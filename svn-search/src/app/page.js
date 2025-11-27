@@ -9,21 +9,38 @@ export default function Home() {
     const [loading, setLoading] = useState(false);
     const [syncStatus, setSyncStatus] = useState({ isSyncing: false, lastSync: null });
 
+    const [showMonitor, setShowMonitor] = useState(false);
+    const [progress, setProgress] = useState(0);
+    const [remainingTime, setRemainingTime] = useState(null);
+
     // Fetch Sync Status
     const fetchStatus = useCallback(async () => {
         try {
             const res = await fetch('/api/status');
             const data = await res.json();
             setSyncStatus(data);
+
+            if (data.isSyncing && data.startTime) {
+                const elapsed = Date.now() - data.startTime;
+                const estimated = data.estimatedDuration || 60000;
+                const prog = Math.min((elapsed / estimated) * 100, 99); // Cap at 99% until done
+                setProgress(prog);
+
+                const remaining = Math.max(0, Math.ceil((estimated - elapsed) / 1000));
+                setRemainingTime(remaining);
+            } else {
+                setProgress(0);
+                setRemainingTime(null);
+            }
         } catch (error) {
             console.error('Failed to fetch status:', error);
         }
     }, []);
 
-    // Poll status every 5 seconds
+    // Poll status every 1 second for smoother progress
     useEffect(() => {
         fetchStatus();
-        const interval = setInterval(fetchStatus, 5000);
+        const interval = setInterval(fetchStatus, 1000);
         return () => clearInterval(interval);
     }, [fetchStatus]);
 
@@ -55,11 +72,20 @@ export default function Home() {
     // Sync Handler
     const handleSync = async () => {
         try {
-            setSyncStatus(prev => ({ ...prev, isSyncing: true })); // Optimistic update
+            setSyncStatus(prev => ({ ...prev, isSyncing: true }));
             await fetch('/api/sync', { method: 'POST' });
-            // Status polling will catch the actual state
         } catch (error) {
             console.error('Sync trigger failed:', error);
+        }
+    };
+
+    // Cancel Handler
+    const handleCancel = async () => {
+        if (!confirm('Are you sure you want to cancel the sync?')) return;
+        try {
+            await fetch('/api/sync', { method: 'DELETE' });
+        } catch (error) {
+            console.error('Cancel failed:', error);
         }
     };
 
@@ -69,15 +95,66 @@ export default function Home() {
                 <h1 className="title">SVN Project Search</h1>
                 <div className="status-bar">
                     <span>Last Updated: {syncStatus.lastSync || 'Never'}</span>
-                    <button
-                        className="btn btn-primary"
-                        onClick={handleSync}
-                        disabled={syncStatus.isSyncing}
-                    >
-                        {syncStatus.isSyncing ? 'Syncing...' : 'Sync Now'}
-                    </button>
+
+                    <div className="button-group">
+                        <button
+                            className="btn btn-secondary"
+                            onClick={() => setShowMonitor(!showMonitor)}
+                        >
+                            {showMonitor ? 'Hide Monitor' : 'Monitor'}
+                        </button>
+
+                        {syncStatus.isSyncing ? (
+                            <button
+                                className="btn btn-danger"
+                                onClick={handleCancel}
+                            >
+                                Cancel Sync
+                            </button>
+                        ) : (
+                            <button
+                                className="btn btn-primary"
+                                onClick={handleSync}
+                            >
+                                Sync Now
+                            </button>
+                        )}
+                    </div>
                 </div>
             </header>
+
+            {/* Progress & Monitor Section */}
+            {(syncStatus.isSyncing || showMonitor) && (
+                <div className="monitor-section">
+                    {syncStatus.isSyncing && (
+                        <div className="progress-container">
+                            <div className="progress-info">
+                                <span>Syncing...</span>
+                                <span>Est. Remaining: {remainingTime !== null ? `${remainingTime}s` : 'Calculating...'}</span>
+                            </div>
+                            <div className="progress-bar-bg">
+                                <div
+                                    className="progress-bar-fill"
+                                    style={{ width: `${progress}%` }}
+                                ></div>
+                            </div>
+                        </div>
+                    )}
+
+                    {showMonitor && (
+                        <div className="logs-container">
+                            <h3>Sync Logs</h3>
+                            <div className="logs-window">
+                                {syncStatus.logs && syncStatus.logs.length > 0 ? (
+                                    syncStatus.logs.map((log, i) => <div key={i} className="log-line">{log}</div>)
+                                ) : (
+                                    <div className="log-line text-muted">No logs available.</div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
 
             <main className="card">
                 <div className="search-controls">

@@ -11,11 +11,10 @@ export function parseSvnOutput(output, baseUrl) {
     const projects = [];
 
     for (const line of lines) {
-        // Filter for lines ending in 'pom.xml' (case-insensitive check if needed, but usually lowercase)
-        // User example: Select-String -Pattern '/pom\.xml$'
-        if (line.trim().endsWith('pom.xml')) {
-            // Strip '/pom.xml' or just 'pom.xml' if it's at root (though unlikely for -R)
-            const path = line.replace(/\/pom\.xml$/, '').replace(/pom\.xml$/, '');
+        // Filter for lines ending in 'pom.xml' (case-insensitive)
+        if (/pom\.xml$/i.test(line.trim())) {
+            // Strip '/pom.xml' or just 'pom.xml' (case-insensitive)
+            const path = line.replace(/\/pom\.xml$/i, '').replace(/pom\.xml$/i, '');
 
             // Extract Project Name (last directory)
             // Example: APV/branch/DBINS/Hiware-Apv-UI-DbIns -> Hiware-Apv-UI-DbIns
@@ -39,14 +38,20 @@ export function parseSvnOutput(output, baseUrl) {
 /**
  * Executes `svn list -R` on the given URL.
  * @param {string} url 
- * @returns {Promise<string>} Raw output
+ * @param {function(string): void} [onData] - Callback for stdout/stderr data
+ * @returns {{ promise: Promise<string>, child: import('child_process').ChildProcess }}
  */
-export function svnListRecursive(url) {
-    return new Promise((resolve, reject) => {
-        const svn = spawn('svn', ['list', '-R', url]);
-        let stdout = '';
-        let stderr = '';
+export function svnListRecursive(url, onData) {
+    const svn = spawn('svn', ['list', '-R', '--non-interactive', '--trust-server-cert', url]);
+    let stdout = '';
+    let stderr = '';
 
+    if (onData) {
+        svn.stdout.on('data', (data) => onData(data.toString()));
+        svn.stderr.on('data', (data) => onData(data.toString()));
+    }
+
+    const promise = new Promise((resolve, reject) => {
         svn.stdout.on('data', (data) => {
             stdout += data.toString();
         });
@@ -56,7 +61,9 @@ export function svnListRecursive(url) {
         });
 
         svn.on('close', (code) => {
-            if (code !== 0) {
+            if (code === null) {
+                reject(new Error('SVN command cancelled'));
+            } else if (code !== 0) {
                 reject(new Error(`SVN command failed with code ${code}: ${stderr}`));
             } else {
                 resolve(stdout);
@@ -67,4 +74,6 @@ export function svnListRecursive(url) {
             reject(err);
         });
     });
+
+    return { promise, child: svn };
 }

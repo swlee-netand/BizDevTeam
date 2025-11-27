@@ -2,60 +2,120 @@ import db from './db';
 import { svnListRecursive, parseSvnOutput } from './svn';
 
 const SVN_URL = 'https://192.168.0.134:8443/svn/hiware/v6';
+
+// State
 let isSyncing = false;
+let currentProcess = null;
+let startTime = null;
+let logs = [];
+const MAX_LOGS = 100;
+
+function addLog(message) {
+    const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+    logs.push(`[${timestamp}] ${message}`);
+    if (logs.length > MAX_LOGS) logs.shift();
+}
 
 export function getSyncStatus() {
     const stmt = db.prepare('SELECT value FROM metadata WHERE key = ?');
-    const result = stmt.get('last_sync_timestamp');
+    const lastSync = stmt.get('last_sync_timestamp')?.value;
+    const lastDuration = stmt.get('last_sync_duration_ms')?.value;
+
     return {
         isSyncing,
-        lastSync: result ? result.value : null,
+        lastSync,
+        startTime,
+        logs,
+        estimatedDuration: lastDuration ? parseInt(lastDuration, 10) : 60000, // Default 60s
     };
+}
+
+export function cancelSync() {
+    if (isSyncing && currentProcess) {
+        addLog('Cancelling sync...');
+        currentProcess.kill();
+        isSyncing = false;
+        currentProcess = null;
+        return true;
+    }
+    return false;
 }
 
 export async function syncProjects() {
     if (isSyncing) {
-        console.log('Sync already in progress.');
         return { success: false, message: 'Already syncing' };
     }
 
     isSyncing = true;
-    console.log('Starting SVN sync...');
+    startTime = Date.now();
+    logs = [];
+    addLog('Starting SVN sync...');
 
     try {
         // 1. Fetch from SVN
-        const rawOutput = await svnListRecursive(SVN_URL);
+        const commandStr = `svn list -R --non-interactive --trust-server-cert ${SVN_URL}`;
+        addLog(`Executing: ${commandStr}`);
+
+        const { promise, child } = svnListRecursive(SVN_URL, (data) => {
+            // Optional: Log every line? Might be too noisy. 
+            // Let's just log chunks or progress dots if needed.
+            // For now, maybe just log that we received data.
+            // addLog(`Received data chunk...`); 
+        });
+        currentProcess = child;
+
+        const rawOutput = await promise;
+        currentProcess = null; // Process finished
 
         // 2. Parse
+        addLog('Parsing SVN output...');
         const projects = parseSvnOutput(rawOutput, SVN_URL);
-        console.log(`Found ${projects.length} projects.`);
+        addLog(`Found ${projects.length} projects.`);
 
         // 3. Update DB (Transaction)
-        const insert = db.prepare('INSERT INTO projects (name, url, path) VALUES (@name, @url, @path)');
-        const clear = db.prepare('DELETE FROM projects'); // Full refresh strategy for simplicity, or we can do upsert/diff
-        // User asked for "DB에 없는 결과가 있을 수 있음을 알리는..." but also "DB나 캐시에 정리".
-        // A full replace is safest to remove deleted projects, but might cause a split second of empty results if not in transaction.
-        // SQLite transactions are atomic.
+        addLog('Updating database...');
+        const insertOrReplace = db.prepare(`
+            INSERT OR REPLACE INTO projects (name, url, path) 
+            VALUES (@name, @url, @path)
+        `);
+        const deleteMissing = db.prepare(`
+            DELETE FROM projects 
+            WHERE url NOT IN (SELECT value FROM json_each(?))
+        `);
 
         const transaction = db.transaction((projects) => {
-            clear.run();
+            // 1. Upsert all found projects
             for (const project of projects) {
-                insert.run(project);
+                insertOrReplace.run(project);
             }
 
-            // Update timestamp
-            const now = new Date().toISOString().replace('T', ' ').split('.')[0]; // Simple format
+            // 2. Delete projects that are no longer in SVN
+            const currentUrls = JSON.stringify(projects.map(p => p.url));
+            deleteMissing.run(currentUrls);
+
+            // Update timestamp & duration
+            const now = new Date().toISOString().replace('T', ' ').split('.')[0];
+            const duration = Date.now() - startTime;
+
             db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('last_sync_timestamp', now);
+            db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('last_sync_duration_ms', duration);
         });
 
         transaction(projects);
-        console.log('Sync completed successfully.');
+        addLog('Sync completed successfully.');
         return { success: true, count: projects.length };
 
     } catch (error) {
+        if (error.message === 'SVN command cancelled') {
+            addLog('Sync cancelled by user.');
+            return { success: false, message: 'Cancelled' };
+        }
         console.error('Sync failed:', error);
+        addLog(`Error: ${error.message}`);
         return { success: false, error: error.message };
     } finally {
         isSyncing = false;
+        currentProcess = null;
+        startTime = null;
     }
 }

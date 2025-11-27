@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { syncProjects } from '@/lib/sync';
+import { syncProjects, cancelSync } from '@/lib/sync';
 
 export async function POST() {
     // Trigger sync in background
@@ -7,4 +7,13 @@ export async function POST() {
     syncProjects().catch(err => console.error('Background sync failed:', err));
 
     return NextResponse.json({ message: 'Sync started' });
+}
+
+export async function DELETE() {
+    const success = cancelSync();
+    if (success) {
+        return NextResponse.json({ message: 'Sync cancelled' });
+    } else {
+        return NextResponse.json({ message: 'No active sync to cancel' }, { status: 400 });
+    }
 }
